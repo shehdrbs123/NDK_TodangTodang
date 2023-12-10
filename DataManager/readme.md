@@ -20,12 +20,16 @@
 <br>
 <br>
 
-## 🤔 해결 과정
+## 🤔 개선 과정
 
 - 여러 개의 코드가 아닌 한 개의 코드로 관리할 수 있는 방안은 제네릭 메소드가 적합하다고 판단.
-- 제네릭 메소드를 이용하면, 하나의 메소드로 단일화 시킬 수 있다고 판단, 제네릭 메소드를 이용
-- 추가적으로 옵저버 패턴을 활용하게 된다면, 저장 대상에 대해 저장 시 따로따로 요청해서 하는 것이 아닌<br>
-  하나의 클래스를 통해 데이터를 전부 저장할 수 있는 형태로 구성되므로, 옵저버 패턴 적용.
+- 추가적으로 옵저버 패턴을 활용하게 된다면, 저장 대상 DataManager에 구독을 등록하고 <br>
+  DataManager는 구독된 클래스들로 부터 JsonData를 받아 저장하는 하는 형태<br>
+
+- 다만 Load과정은 JsonData를 통하고 싶었지만, 기본 데이터를 DataManager에서 관리하고 있어, 각각의 data 자식 클래스에서 참조하는 것은 코드의 결합도를 높이는 결과라고 판단,
+- Load과정에서는 DataManager에서 각각의 Data를 직접 반환해주는 것으로 결정
+- 이때 제네릭 메소드를 이용, 코드를 하나로 묶어서 관리할 수 있도록 만들어
+코드 수정을 국소적으로 해도 되도록 수정함.
 
 <br>
 <br>
@@ -133,13 +137,13 @@ public override string GetJsonData()
     marketSaveData.IngredientPriceValues= new List<int>();
     marketSaveData.IsSellableStrs = new List<string>();
     marketSaveData.IsSellableValues = new List<bool>();
-    foreach (var pricesKeyValue in GetIngredientPrices())
+    foreach (KeyValuePair<string, int> pricesKeyValue in GetIngredientPrices())
     {
         marketSaveData.IngredientPriceStrs.Add(pricesKeyValue.Key);
         marketSaveData.IngredientPriceValues.Add(pricesKeyValue.Value);
     }
     
-    foreach (var sellableKeyValue in GetIsSellableDatas())
+    foreach (KeyValuePair<string, bool> sellableKeyValue in GetIsSellableDatas())
     {
         marketSaveData.IsSellableStrs.Add(sellableKeyValue.Key);
         marketSaveData.IsSellableValues.Add(sellableKeyValue.Value);
@@ -158,15 +162,146 @@ public override string GetJsonData()
 <br>
 
 ### Load과정
-
-- Load과정은 JsonData를 통하고 싶었지만, 기본 데이터를 DataManager에서 관리하고 있어, 각각의 data 자식 클래스에서 참조하는 것은 코드의 결합도를 높이는 결과라고 판단,
-- Load과정에서는 각각의 Data를 직접 반환해주는 것으로 결정
-- 이때 제네릭 메소드를 이용, 코드를 하나로 묶어서 관리할 수 있도록 만들어
-코드 수정을 국소적으로 해도 되도록 수정함.
+- GameManager에서 Load요청을 수행하고, 이때 제네릭 메소드로 접근하여 데이터를 가져감
 
 ### 관련 코드
 
 - DataManager.cs의 Load 과정
+ ```csharp
+public void LoadData<T>(out T data) where T : Savable, new()
+{
+    Type dataType = typeof(T);
+    data = null;
+    string jsonData = null;
+    if (_filePathDic.TryGetValue(dataType, out string filePath) && File.Exists(filePath))
+    {
+        jsonData = Load(filePath,out bool needEncrypt);
+        
+        if (jsonData == string.Empty || isCorrupted)
+        {
+            GetDefaultData<T>(dataType, out data);
+        }
+        else
+        {
+            data = new T();
+						Param param = GetParam<T>();
+            data.Init(jsonData,param);                
+        }
+        if (needEncrypt)
+        {
+            Save(jsonData,filePath);
+        }
+    }
+    else
+    {   
+#if UNITY_EDITOR
+        if(filePath == null)
+            Debug.LogWarning("type에 맞는 filePath가 없습니다. 신경써주세요");
+#endif
+        GetDefaultData<T>(dataType, out data);
+    }
+}
+
+
+private string Load(string path, out bool needEncrypt)
+{
+    string data = string.Empty;
+    needEncrypt = false;
+    using (StreamReader sr = new StreamReader(path))
+    {
+        string encrypdata = sr.ReadToEnd();
+        // 추후에 버전 체크를 할 수 있게 변형할 수 있음.
+        if (encrypdata.StartsWith(Strings.SaveData.SAVE_VERSION))
+        {
+            string[] splited = encrypdata.Split("|");
+            if (splited.Length != 3)
+            {
+                isCorrupted = true;
+                Debug.LogWarning(Strings.Data.);
+                return string.Empty;
+            }
+            else
+            {
+                string hashString = $"{splited[0]}|{splited[1]}";
+                int hash;
+                if (int.TryParse(splited[2],out hash)&& hash == hashString.GetHashCode())
+                {
+                    data = DecryptData(splited[1]);
+                }
+                else
+                {
+                    isCorrupted = true;
+                    Debug.LogWarning("데이터의 이상");
+                    return string.Empty;
+                }
+            }
+        }
+        else if ( encrypdata.StartsWith("{"))
+        {
+            data = encrypdata;
+            needEncrypt = true;
+        }
+        else
+        {
+            isCorrupted = true;
+            Debug.LogWarning("데이터의 이상");
+            return string.Empty;
+        }
+        
+    }
+    return data;
+}
+
+private void GetDefaultData<T>(Type dataType, out T data) where T : Savable
+{
+    data = null;
+    if (dataType == typeof(PlayerData))
+    {
+        data = MakeDefaultPlayerData() as T;
+    }
+    else if(dataType == typeof(MarketData))
+    {
+        IngredientInfoSO[] ingredientInfoSos = GetDefaultDataArray<IngredientInfoSO>();
+        data = MakeDefaultMarketData(ingredientInfoSos) as T;
+    }
+    else if(dataType == typeof(DecoStoreData))
+    {
+        data = MakeDefaultDecoStoreData() as T;
+    }
+    else if (dataType == typeof(NewsSystem))
+    {
+        data = new NewsSystem() as T;
+    }
+}
+
+private Param GetParam<T>()
+{
+    Param data = null;
+    Type dataType = typeof(T);
+    if(dataType == typeof(MarketData))
+    {
+        MarketData.MarketDataParam param = new MarketData.MarketDataParam();
+        IngredientInfoSO[] ingredientInfoSos = GetDefaultDataArray<IngredientInfoSO>();
+        param.IngredientInfoSos = ingredientInfoSos;
+        data = param;
+    }
+    else if(dataType == typeof(DecoStoreData))
+    {
+        DecoStoreData.DecoStoreDataParam param = new DecoStoreData.DecoStoreDataParam();
+        StoreDecorationInfoSO[] storeDecorationInfoSos = GetDefaultDataArray<StoreDecorationInfoSO>();
+        param._storeDecoDatas = storeDecorationInfoSos;
+        data = param;
+    }
+
+    return data;
+}
+
+// 각각의 SaveData들이 자신의 초기화 변수를 담기 위함
+public abstract class Param 
+{
+    
+}
+``` 
 MarketData.cs(로드되는 데이터 중 하나)<br>
 Init : JsonData데이터가 있을 때 로드 시 사용<br>
 GetJson : 저장 시 JsonData 반환
